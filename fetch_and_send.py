@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-import os, requests, re
+import os, requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
@@ -28,8 +28,8 @@ def parse_page(url):
     resp.encoding = "euc-kr"
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # 날짜 확인
-    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y.%m.%d")
+    # ✅ 날짜 확인 (YY.MM.DD 형식, 예: 25.08.21)
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%y.%m.%d")
     date_elems = soup.select("div.subtop_sise_graph2 > div")  # 두 개 div가 있음
     date_texts = [d.get_text(strip=True) for d in date_elems]
     if not any(today in t for t in date_texts):
@@ -63,15 +63,15 @@ def main():
             send(f"❌ {key} 처리 실패: {e}")
             return
 
-    # 종목 수 확인
+    # ✅ 종목 수 확인
     if len(all_data) != 80:
         send(f"❌ 오류발생: 종목 수 불일치 (len={len(all_data)})")
         return
 
-    # 금액 기준 정렬 후 상위 25
+    # ✅ 금액 기준 정렬 후 상위 25
     top25 = sorted(all_data, key=lambda x: x[1], reverse=True)[:25]
 
-    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%y.%m.%d")
     lines = [f"📈 {today} 장마감 순매수 상위 TOP25", ""]
     for i, (name, amt) in enumerate(top25, 1):
         lines.append(f"{i}. {name} {amt:,}백만")
