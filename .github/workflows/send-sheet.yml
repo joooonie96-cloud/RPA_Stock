@@ -1,4 +1,4 @@
-name: Send Google Sheet RANGE as Image (KR weekdays)
+name: Send Google Sheet
 
 on:
   schedule:
