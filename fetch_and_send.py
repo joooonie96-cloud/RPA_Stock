@@ -4,6 +4,9 @@ import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import chromedriver_autoinstaller
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -15,7 +18,6 @@ URLS = {
     "외국인(KOSPI)": ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=2000", "외국인"),
     "외국인(KOSDAQ)":("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=2000", "외국인"),
 }
-
 
 # ======================
 # 드라이버 초기화
@@ -29,23 +31,38 @@ def init_driver():
     driver = webdriver.Chrome(options=options)
     return driver
 
-
 # ======================
 # 크롤링
 # ======================
 def fetch_data(url, investor_type, driver):
     driver.get(url)
     print(f"[DEBUG] 페이지 로딩 완료: {url}")
-    time.sleep(5)  # 일단 5초 대기 (추후 WebDriverWait로 개선 가능)
 
-    # HTML 앞부분 찍기 (디버깅용)
-    html_preview = driver.page_source[:1000]
-    print(f"[DEBUG] HTML 미리보기 ({investor_type}):\n{html_preview}\n")
+    # 👉 iframe 로딩 기다리고 진입
+    try:
+        iframe = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#frame_ex"))
+        )
+        driver.switch_to.frame(iframe)
+        print(f"[DEBUG] {investor_type} iframe 진입 성공")
+    except Exception:
+        raise ValueError(f"[{investor_type}] iframe 로딩 실패")
 
+    # 👉 iframe 안에서 테이블 로딩 기다리기
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "table.type_2"))
+        )
+    except Exception:
+        driver.switch_to.default_content()
+        raise ValueError(f"[{investor_type}] 테이블 로딩 실패")
+
+    # 👉 테이블 파싱
     soup = BeautifulSoup(driver.page_source, "html.parser")
     table = soup.select_one("table.type_2")
     if not table:
-        raise ValueError(f"[{investor_type}] 테이블 못 찾음")
+        driver.switch_to.default_content()
+        raise ValueError(f"[{investor_type}] 테이블 못 찾음 (iframe 안)")
 
     rows = table.select("tr")
     data = []
@@ -62,8 +79,10 @@ def fetch_data(url, investor_type, driver):
             "순매수금액": int(amount),
             "투자자": investor_type
         })
-    return data
 
+    # 👉 다음 URL 크롤링을 위해 다시 메인 페이지로 복귀
+    driver.switch_to.default_content()
+    return data
 
 # ======================
 # 데이터 집계
@@ -85,7 +104,6 @@ def aggregate_data():
         result[investor] = sorted_items[:25]
     return result
 
-
 # ======================
 # 메시지 포맷
 # ======================
@@ -98,7 +116,6 @@ def format_message(result):
         msg.append("")
     return "\n".join(msg)
 
-
 # ======================
 # 텔레그램 전송
 # ======================
@@ -110,7 +127,6 @@ def send_telegram_message(bot_token, chat_id, text):
         print("❌ 텔레그램 전송 실패:", res.text)
     else:
         print("✅ 텔레그램 전송 성공")
-
 
 # ======================
 # 실행부
