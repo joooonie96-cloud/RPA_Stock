@@ -29,6 +29,8 @@ HEADERS = {
         "Chrome/115.0.0.0 Safari/537.36"
     ),
     "Referer": "https://finance.naver.com/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
 URLS = {
@@ -51,7 +53,8 @@ def fetch_from_naver():
             soup = BeautifulSoup(resp.text, "html.parser")
             table = soup.select_one("table.type_2")
             if not table:
-                results[key] = ["테이블 없음 (구조 변경 가능)"]
+                snippet = resp.text[:300].replace("\n", " ")
+                results[key] = [f"테이블 없음. 응답 앞부분: {snippet}"]
                 continue
 
             rows = []
@@ -64,7 +67,7 @@ def fetch_from_naver():
                 if not name or name == "합계":
                     continue
                 rows.append(f"{len(rows)+1}. {name} {amt}백만")
-                if len(rows) >= 10:
+                if len(rows) >= 10:  # TOP10까지만
                     break
 
             results[key] = rows if rows else ["데이터 없음"]
@@ -81,7 +84,6 @@ def main():
         send(f"📈 {today}\n오늘은 주말이라 장이 없습니다.")
         return
 
-    # 단 1번만 시도
     results = fetch_from_naver()
 
     parts = []
