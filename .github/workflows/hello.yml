@@ -1,0 +1,13 @@
+name: Hello World Test
+
+on:
+  workflow_dispatch: {}   # 수동 실행 가능
+  push:                   # main 브랜치에 push 시 실행
+    branches: [ "main" ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Say Hello
+        run: echo "✅ Hello World from GitHub Actions!"
