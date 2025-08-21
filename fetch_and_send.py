@@ -4,26 +4,24 @@ import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 import chromedriver_autoinstaller
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID")
 
+# ⚡ iframe src 직접 접근 (안정 버전)
 URLS = {
-    "기관(KOSPI)"  : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=1000", "기관"),
-    "기관(KOSDAQ)" : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=1000", "기관"),
-    "외국인(KOSPI)": ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=2000", "외국인"),
-    "외국인(KOSDAQ)":("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=2000", "외국인"),
+    "기관(KOSPI)"  : ("https://finance.naver.com/sise/sise_deal_rank_sub.naver?sosok=01&investor_gubun=1000", "기관"),
+    "기관(KOSDAQ)" : ("https://finance.naver.com/sise/sise_deal_rank_sub.naver?sosok=02&investor_gubun=1000", "기관"),
+    "외국인(KOSPI)": ("https://finance.naver.com/sise/sise_deal_rank_sub.naver?sosok=01&investor_gubun=2000", "외국인"),
+    "외국인(KOSDAQ)":("https://finance.naver.com/sise/sise_deal_rank_sub.naver?sosok=02&investor_gubun=2000", "외국인"),
 }
 
 # ======================
 # 드라이버 초기화
 # ======================
 def init_driver():
-    chromedriver_autoinstaller.install()  # 크롬 버전에 맞는 드라이버 자동 설치
+    chromedriver_autoinstaller.install()
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -38,31 +36,10 @@ def fetch_data(url, investor_type, driver):
     driver.get(url)
     print(f"[DEBUG] 페이지 로딩 완료: {url}")
 
-    # 👉 iframe 로딩 기다리고 진입
-    try:
-        iframe = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "iframe#frame_ex"))
-        )
-        driver.switch_to.frame(iframe)
-        print(f"[DEBUG] {investor_type} iframe 진입 성공")
-    except Exception:
-        raise ValueError(f"[{investor_type}] iframe 로딩 실패")
-
-    # 👉 iframe 안에서 테이블 로딩 기다리기
-    try:
-        WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "table.type_2"))
-        )
-    except Exception:
-        driver.switch_to.default_content()
-        raise ValueError(f"[{investor_type}] 테이블 로딩 실패")
-
-    # 👉 테이블 파싱
     soup = BeautifulSoup(driver.page_source, "html.parser")
     table = soup.select_one("table.type_2")
     if not table:
-        driver.switch_to.default_content()
-        raise ValueError(f"[{investor_type}] 테이블 못 찾음 (iframe 안)")
+        raise ValueError(f"[{investor_type}] 테이블 못 찾음")
 
     rows = table.select("tr")
     data = []
@@ -79,9 +56,6 @@ def fetch_data(url, investor_type, driver):
             "순매수금액": int(amount),
             "투자자": investor_type
         })
-
-    # 👉 다음 URL 크롤링을 위해 다시 메인 페이지로 복귀
-    driver.switch_to.default_content()
     return data
 
 # ======================
