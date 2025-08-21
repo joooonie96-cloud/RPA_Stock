@@ -1,43 +1,61 @@
-import requests
 import os
+import time
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from bs4 import BeautifulSoup
+import requests
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID")
 
 URLS = {
-    "기관(KOSPI)"  : ("https://api.finance.naver.com/sise/investorDealRankJson.naver?investorType=1000&marketType=kospi", "기관"),
-    "기관(KOSDAQ)" : ("https://api.finance.naver.com/sise/investorDealRankJson.naver?investorType=1000&marketType=kosdaq", "기관"),
-    "외국인(KOSPI)": ("https://api.finance.naver.com/sise/investorDealRankJson.naver?investorType=2000&marketType=kospi", "외국인"),
-    "외국인(KOSDAQ)":("https://api.finance.naver.com/sise/investorDealRankJson.naver?investorType=2000&marketType=kosdaq", "외국인"),
+    "기관(KOSPI)"  : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=1000", "기관"),
+    "기관(KOSDAQ)" : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=1000", "기관"),
+    "외국인(KOSPI)": ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=2000", "외국인"),
+    "외국인(KOSDAQ)":("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=2000", "외국인"),
 }
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+def init_driver():
+    options = Options()
+    options.add_argument("--headless")   # 창 안 띄우고 실행
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    driver = webdriver.Chrome(options=options)
+    return driver
 
-def fetch_data(url, investor_type):
-    res = requests.get(url, headers=HEADERS)
-    res.raise_for_status()
-    data = res.json()
+def fetch_data(url, investor_type, driver):
+    driver.get(url)
+    time.sleep(2)  # 페이지 로딩 대기
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+    table = soup.select_one("table.type_2")
+    rows = table.select("tr")
 
-    result = []
-    for item in data:
-        stock = item.get("name")
-        amount = item.get("net_buy_amount")  # 순매수금액
-        if stock and amount is not None:
-            result.append({
-                "종목": stock,
-                "순매수금액": int(amount),
-                "투자자": investor_type
-            })
-    return result
+    data = []
+    for row in rows:
+        cols = row.select("td")
+        if len(cols) < 6:
+            continue
+        stock = cols[1].get_text(strip=True)
+        amount = cols[5].get_text(strip=True).replace(",", "")
+        if not amount or not amount.lstrip("-").isdigit():
+            continue
+        data.append({
+            "종목": stock,
+            "순매수금액": int(amount),
+            "투자자": investor_type
+        })
+    return data
 
 def aggregate_data():
+    driver = init_driver()
     all_data = {"기관": [], "외국인": []}
     for name, (url, investor) in URLS.items():
         try:
-            data = fetch_data(url, investor)
+            data = fetch_data(url, investor, driver)
             all_data[investor].extend(data)
         except Exception as e:
             print(f"❌ {name} 오류: {e}")
+    driver.quit()
 
     result = {}
     for investor, items in all_data.items():
