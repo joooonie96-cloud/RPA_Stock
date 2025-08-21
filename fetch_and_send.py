@@ -1,13 +1,8 @@
 # -*- coding: utf-8 -*-
-# 네이버 증권 "외국인/기관 × 코스피/코스닥" 순매수 상위 크롤링 → 텔레그램 발송
-# 요구사항 반영:
-#  - 날짜 검증: div.sise_guide_date == 오늘(YY.MM.DD), 불일치시 오류 메시지 전송
-#  - 외국인/기관 × 코스피/코스닥 총 80종목(각 40) 수집 여부 점검
-#  - 외국인 TOP25, 기관 TOP25를 '금액(백만)' 기준으로 별도 정렬/발송
-# 필요 패키지: requests, beautifulsoup4
+# 네이버 증권 "외국인/기관 × 코스피/코스닥" 순매수 상위 크롤링 → 텔레그램 발송 (날짜 탐색 강화)
 # pip install requests beautifulsoup4
 
-import os, requests
+import os, re, requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
@@ -37,8 +32,7 @@ HEADERS = {
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# 네이버 실제 화면 매핑(사용자 확인 기준)
-# key: 화면 라벨, value: (url, investor)  investor는 "외국인" 또는 "기관"
+# key: 화면 라벨, value: (url, investor)
 URLS = {
     "기관(KOSPI)"  : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=1000", "기관"),
     "기관(KOSDAQ)" : ("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=1000", "기관"),
@@ -46,10 +40,49 @@ URLS = {
     "외국인(KOSDAQ)":("https://finance.naver.com/sise/sise_deal_rank.naver?sosok=02&investor_gubun=2000", "외국인"),
 }
 
+# ───────────────── 유틸 ─────────────────
+DATE_REGEX = re.compile(r"\b\d{2}\.\d{2}\.\d{2}\b")  # YY.MM.DD
+
+def find_page_date(soup: BeautifulSoup, raw_html: str) -> str | None:
+    """
+    가능한 날짜 위치를 순차 탐색:
+      1) div.sise_guide_date
+      2) 상단 안내/가이드 영역 추정 선택자들
+      3) 페이지 전체 텍스트 정규식 탐색 (YY.MM.DD)
+    """
+    # 1) 가장 확실한 기존 셀렉터
+    cand = soup.select_one("div.sise_guide_date")
+    if cand:
+        txt = cand.get_text(strip=True)
+        if DATE_REGEX.search(txt):
+            return txt
+
+    # 2) 다른 상단 후보 셀렉터 시도 (페이지 변형 대응)
+    candidates = [
+        "div.guide_info", "div.guide", "div#content > div h3", "div#content > h3",
+        "div.section_sise_top", "div.subtop_sise_graph2", "div.wrap_cont > div"
+    ]
+    for sel in candidates:
+        el = soup.select_one(sel)
+        if not el:
+            continue
+        txt = el.get_text(" ", strip=True)
+        m = DATE_REGEX.search(txt)
+        if m:
+            return m.group(0)
+
+    # 3) 전체 텍스트에서 최종 탐색
+    m = DATE_REGEX.search(soup.get_text(" ", strip=True))
+    if m:
+        return m.group(0)
+
+    # 그래도 실패 → raw_html 앞부분을 디버그로 확인하기 좋게 반환 None
+    return None
+
 # ───────────────── 파서 ─────────────────
 def parse_page(url: str):
     """
-    - 날짜 검증: div.sise_guide_date == 오늘(YY.MM.DD)
+    - 날짜 검증: find_page_date()로 찾은 값 == 오늘(YY.MM.DD)
     - 표 파싱: table.type_2 의 tbody > tr 에서
         종목명: 첫 번째 td 내부의 p > a
         금액  : 세 번째 td (백만 단위, 콤마 제거 후 int, 음수 허용)
@@ -61,17 +94,16 @@ def parse_page(url: str):
     resp.encoding = "euc-kr"
     soup = BeautifulSoup(resp.text, "html.parser")
 
-    # ✅ 날짜 확인 (YY.MM.DD, 예: 25.08.21)
+    # ✅ 날짜 확인 (YY.MM.DD)
     today = datetime.now(timezone(timedelta(hours=9))).strftime("%y.%m.%d")
-    date_elem = soup.select_one("div.sise_guide_date")
-    if not date_elem:
+    page_date = find_page_date(soup, resp.text)
+    if not page_date:
         snippet = resp.text[:200].replace("\n", " ")
-        raise ValueError(f"날짜 element 없음(div.sise_guide_date). 응답 앞부분: {snippet}")
-    page_date = date_elem.get_text(strip=True)
+        raise ValueError(f"날짜 탐색 실패. 응답 앞부분: {snippet}")
     if page_date != today:
         raise ValueError(f"날짜 불일치 (today={today}, page={page_date})")
 
-    # ✅ 표 파싱
+    # ✅ 표 파싱 (type_2 테이블 중 첫 번째 표 기준)
     table = soup.select_one("table.type_2")
     if not table:
         snippet = resp.text[:200].replace("\n", " ")
@@ -82,54 +114,48 @@ def parse_page(url: str):
         tds = tr.find_all("td")
         if len(tds) < 3:
             continue
-        # 종목명: 첫 번째 td > p > a
         name_tag = tds[0].select_one("p > a")
-        # 금액: 세 번째 td
         amt_tag  = tds[2]
         if not name_tag or not amt_tag:
             continue
         name = name_tag.get_text(strip=True)
         amt_str = amt_tag.get_text(strip=True).replace(",", "")
-        # 허용: 음수("-123")도 int 변환 가능하게
         if not amt_str or not amt_str.replace("-", "").isdigit():
             continue
         amt = int(amt_str)
         data.append((name, amt))
     return data
 
-# ───────────────── 메인 로직 ─────────────────
+# ───────────────── 메인 ─────────────────
 def main():
     kst = timezone(timedelta(hours=9))
     today_label = datetime.now(kst).strftime("%y.%m.%d")
 
-    # 네 섹션 수집 + 카테고리 분리
-    foreign = []  # 외국인 (KOSPI+KOSDAQ)
-    inst = []     # 기관   (KOSPI+KOSDAQ)
+    foreign = []  # 외국인 합산
+    inst = []     # 기관 합산
+    total = 0
 
-    total_count_check = 0
     for label, (url, investor) in URLS.items():
         try:
-            rows = parse_page(url)  # [(name, amt)]
+            rows = parse_page(url)
         except Exception as e:
             send(f"❌ {label} 처리 실패: {e}")
             return
-
-        total_count_check += len(rows)
+        total += len(rows)
         if investor == "외국인":
             foreign.extend(rows)
         else:
             inst.extend(rows)
 
-    # 3) 전체 80종목(외국인40 + 기관40) 검증
-    if total_count_check != 80 or len(foreign) != 40 or len(inst) != 40:
-        send(f"❌ 오류발생: 종목 수 불일치 (총={total_count_check}, 외국인={len(foreign)}, 기관={len(inst)})")
+    # 80종목(외40+기40) 검증
+    if total != 80 or len(foreign) != 40 or len(inst) != 40:
+        send(f"❌ 오류발생: 종목 수 불일치 (총={total}, 외국인={len(foreign)}, 기관={len(inst)})")
         return
 
-    # 4) 금액 기준으로 각 카테고리 정렬 후 상위 25
+    # 투자자별 상위 25
     top25_foreign = sorted(foreign, key=lambda x: x[1], reverse=True)[:25]
     top25_inst    = sorted(inst,    key=lambda x: x[1], reverse=True)[:25]
 
-    # 메시지 조립
     lines = [f"📈 {today_label} 장마감 순매수 상위 (네이버 증권)"]
     lines.append("")
     lines.append("🔹 외국인 TOP25")
