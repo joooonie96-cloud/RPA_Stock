@@ -3,7 +3,7 @@
 # 필요 패키지: requests, beautifulsoup4
 # pip install requests beautifulsoup4
 
-import os, time, requests
+import os, requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta, timezone
 
@@ -16,10 +16,20 @@ if not BOT or not CHAT:
 TG_URL = f"https://api.telegram.org/bot{BOT}/sendMessage"
 
 def send(msg):
-    r = requests.post(TG_URL, data={"chat_id": CHAT, "text": msg}, timeout=20)
-    r.raise_for_status()
+    try:
+        r = requests.post(TG_URL, data={"chat_id": CHAT, "text": msg}, timeout=20)
+        r.raise_for_status()
+    except Exception as e:
+        print("텔레그램 전송 실패:", e)
 
-HEADERS = {"User-Agent":"Mozilla/5.0", "Referer":"https://finance.naver.com/"}
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/115.0.0.0 Safari/537.36"
+    ),
+    "Referer": "https://finance.naver.com/",
+}
 
 URLS = {
     "기관(KOSPI)":   "https://finance.naver.com/sise/sise_deal_rank.naver?sosok=01&investor_gubun=1000",
@@ -33,9 +43,17 @@ def fetch_from_naver():
     for key, url in URLS.items():
         try:
             resp = requests.get(url, headers=HEADERS, timeout=20)
+            if resp.status_code != 200:
+                results[key] = [f"HTTP 오류 (status {resp.status_code})"]
+                continue
+
             resp.encoding = "euc-kr"
             soup = BeautifulSoup(resp.text, "html.parser")
             table = soup.select_one("table.type_2")
+            if not table:
+                results[key] = ["테이블 없음 (구조 변경 가능)"]
+                continue
+
             rows = []
             for tr in table.select("tr"):
                 tds = tr.find_all("td")
@@ -46,11 +64,12 @@ def fetch_from_naver():
                 if not name or name == "합계":
                     continue
                 rows.append(f"{len(rows)+1}. {name} {amt}백만")
-                if len(rows) >= 10:  # TOP10까지만
+                if len(rows) >= 10:
                     break
+
             results[key] = rows if rows else ["데이터 없음"]
         except Exception as e:
-            results[key] = ["에러 발생"]
+            results[key] = [f"에러: {e}"]
     return results
 
 def main():
@@ -62,13 +81,8 @@ def main():
         send(f"📈 {today}\n오늘은 주말이라 장이 없습니다.")
         return
 
-    # 장마감 직후 지연 대비: 30초 간격으로 최대 10번 재시도
-    results = {}
-    for attempt in range(10):
-        results = fetch_from_naver()
-        if any("데이터 없음" not in v[0] and "에러 발생" not in v[0] for v in results.values()):
-            break
-        time.sleep(30)
+    # 단 1번만 시도
+    results = fetch_from_naver()
 
     parts = []
     order = ["외국인(KOSPI)", "외국인(KOSDAQ)", "기관(KOSPI)", "기관(KOSDAQ)"]
