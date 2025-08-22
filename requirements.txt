@@ -4,3 +4,5 @@ readability-lxml==0.8.1
 beautifulsoup4==4.12.3
 lxml==5.2.2
 lxml_html_clean==0.4.1
+gspread==6.1.4
+google-auth==2.34.0
