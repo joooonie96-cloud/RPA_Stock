@@ -3,12 +3,14 @@ name: Send Daily Sheet Snapshot
 on:
   workflow_dispatch: {}
   schedule:
-    # 매일 00:00 UTC (한국시간 09:00) 실행
+    # 매일 09:00 KST == 00:00 UTC
     - cron: "0 0 * * *"
 
 jobs:
-  run:
+  send-report:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -26,14 +28,16 @@ jobs:
 
       - name: Run script
         env:
-          # ==== Secrets (리포지토리 Settings > Secrets and variables > Actions) ====
+          # ===== REQUIRED (Repository Secrets) =====
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          # ==== Optional overrides ====
-          SHEET_RANGE_TOP: ${{ vars.SHEET_RANGE_TOP }}
-          SHEET_RANGE_BOTTOM: ${{ vars.SHEET_RANGE_BOTTOM }}
-          EXPORT_SCALE: ${{ vars.EXPORT_SCALE }}
+
+          # ===== OPTIONAL (Repository Variables) - with defaults =====
+          SHEET_RANGE_TOP: ${{ vars.SHEET_RANGE_TOP || '최종!A1:K29' }}
+          SHEET_RANGE_BOTTOM: ${{ vars.SHEET_RANGE_BOTTOM || '최종!A30:K58' }}
+          EXPORT_SCALE: ${{ vars.EXPORT_SCALE || '2' }}
+          HOLIDAY_COUNTRY: ${{ vars.HOLIDAY_COUNTRY || 'KR' }}
         run: |
           python fetch_and_send.py
