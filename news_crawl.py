@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from readability import Document
 from bs4 import BeautifulSoup
+from difflib import SequenceMatcher
 
 # ==== 환경변수 ====
 BOT_TOKEN = os.getenv("BOT_TOKEN")          # 텔레그램 봇 토큰
@@ -18,6 +19,8 @@ KST = timezone(timedelta(hours=9))
 NOW_KST = datetime.now(KST)
 YESTERDAY_KST = (NOW_KST - timedelta(days=1)).date()
 TODAY_KST = NOW_KST.date()
+YESTERDAY_STR = YESTERDAY_KST.strftime("%Y-%m-%d")
+TODAY_STR = TODAY_KST.strftime("%Y-%m-%d")
 
 # '1일' ~ '31일' (각각 검색)
 DAY_TERMS = [f"{d}일" for d in range(1, 32)]
@@ -55,17 +58,20 @@ def get_or_create_daily_ws(sh, date_str: str):
     try:
         ws = sh.worksheet(date_str)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=date_str, rows=4000, cols=3)
+        ws = sh.add_worksheet(title=date_str, rows=6000, cols=4)
     return ws
 
 def write_sheet_all(sh, items):
-    """전체 기사(제목/URL/게시시각KST)를 날짜별 탭에 기록(중복/선별 없음)."""
-    date_tab = TODAY_KST.strftime("%Y-%m-%d")
+    """전체 기사(제목/URL/게시시각KST/매칭 키워드)를 날짜별 탭에 기록."""
+    date_tab = TODAY_STR
     ws = get_or_create_daily_ws(sh, date_tab)
     ws.clear()
-    ws.append_row(["기사 제목", "URL", "게시시각(KST)"])
+    ws.append_row(["기사 제목", "URL", "게시시각(KST)", "매칭 키워드"])
     if items:
-        rows = [[it["title"], it["link"], it["published_kst"].strftime("%Y-%m-%d %H:%M")] for it in items]
+        rows = [
+            [it["title"], it["link"], it["published_kst"].strftime("%Y-%m-%d %H:%M"), ", ".join(sorted(it["matched_terms"]))]
+            for it in items
+        ]
         ws.append_rows(rows, value_input_option="RAW")
     sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={ws.id}"
     return sheet_url, len(items)
@@ -100,6 +106,9 @@ def extract_article_text(url: str) -> str:
     except Exception:
         return ""
 
+def title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.strip(), b.strip()).ratio()
+
 # ==== 텔레그램 ====
 def send_tg(text: str):
     if not BOT_TOKEN or not CHAT_ID:
@@ -115,15 +124,15 @@ def send_tg(text: str):
 
 def build_done_message(sheet_url: str, count: int):
     hdr = "✅ 뉴스 적재가 완료되었습니다."
-    rng = "(범위: 어제~오늘 KST)"
+    rng = f"(범위: 어제 {YESTERDAY_STR} ~ 오늘 {TODAY_STR} · KST)"
     link = f"📊 전체 목록: {html.escape(sheet_url)}"
     cnt  = f"총 적재 건수: {count}건"
     return [f"{hdr}\n{rng}\n{cnt}\n\n{link}"]
 
 # ==== 메인 ====
 def main():
-    # 1) '1일'~'31일' 각각 RSS 호출 → 후보 생성
-    candidates = []
+    # 1) '1일'~'31일' 각각 RSS 호출 → 후보 생성 (matched_terms 포함)
+    raw_candidates = []
     for term in DAY_TERMS:
         for e in fetch_entries_for_term(term):
             title = (e.get("title") or "").strip()
@@ -133,30 +142,65 @@ def main():
             pub_utc = parse_published(e)
             if not is_within_yesterday_or_today(pub_utc):
                 continue
-            candidates.append({
+            raw_candidates.append({
                 "title": title,
                 "link": link,
                 "published_kst": pub_utc.astimezone(KST),
+                "matched_terms": {term},   # 초기엔 현재 쿼리 키워드만
             })
 
-    # 2) 날짜 키워드 필터: 제목 통과 + (제목 미통과는 본문 순차 파싱)
-    results = []
+    # 2) URL 기준 1차 통합(같은 URL이 여러 키워드에서 나오면 최신 시점 + 매칭 키워드 합치기)
+    by_url = {}
+    for it in raw_candidates:
+        key = it["link"]
+        if key not in by_url:
+            by_url[key] = it.copy()
+        else:
+            # 매칭 키워드 합치기
+            by_url[key]["matched_terms"].update(it["matched_terms"])
+            # 더 최신 게시시각/제목으로 갱신
+            if it["published_kst"] > by_url[key]["published_kst"]:
+                by_url[key]["published_kst"] = it["published_kst"]
+                by_url[key]["title"] = it["title"]
+
+    candidates = list(by_url.values())
+
+    # 3) 날짜 키워드 필터: 제목 통과 + (제목 미통과는 본문 파싱으로 확인)
+    matched_items = []
     for it in candidates:
         if DATE_TERM_RE.search(it["title"]):
-            results.append(it)
+            # 제목 안에서 실제 어떤 'X일'이 있었는지 추가로 캐치 (중복 허용)
+            found = DATE_TERM_RE.findall(it["title"])
+            if found:
+                it["matched_terms"].update(found)
+            matched_items.append(it)
         else:
             body = extract_article_text(it["link"])
             if body and DATE_TERM_RE.search(body):
-                results.append(it)
+                found = DATE_TERM_RE.findall(body)
+                if found:
+                    it["matched_terms"].update(found)
+                matched_items.append(it)
 
-    # 3) 최신순 정렬
-    results.sort(key=lambda x: x["published_kst"], reverse=True)
+    # 4) 최신순 정렬
+    matched_items.sort(key=lambda x: x["published_kst"], reverse=True)
 
-    # 4) 스프레드시트 전량 적재
+    # 5) 제목 유사도 90% 이상이면 1개만 유지 (최신 기사 우선)
+    deduped = []
+    kept_titles = []
+    SIM_THRESHOLD = 0.90
+    for it in matched_items:
+        t = it["title"]
+        if kept_titles and max(title_similarity(t, kt) for kt in kept_titles) >= SIM_THRESHOLD:
+            continue
+        deduped.append(it)
+        kept_titles.append(t)
+
+    # 6) 스프레드시트 전량 적재 (제목/URL/게시시각/매칭 키워드)
     sh = ensure_gspread()
-    sheet_url, cnt = write_sheet_all(sh, results)
+    sheet_url, cnt = write_sheet_all(sh, deduped)
 
-    # 5) 텔레그램: 완료 알림 + 시트 링크만
+    # 7) 텔레그램: 완료 알림 + 날짜 명시 + 시트 링크
     for t in build_done_message(sheet_url, cnt):
         send_tg(t)
 
