@@ -3,8 +3,8 @@ name: Send Daily Sheet Snapshot
 on:
   workflow_dispatch: {}
   schedule:
-    # 한국시간(KST) 15:45 == UTC 06:45
-    - cron: "45 6 * * *"
+    # 한국시간(KST) 15:50
+    - cron: "50 6 * * *"
 
 jobs:
   send-report:
