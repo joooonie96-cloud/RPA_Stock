@@ -6,13 +6,12 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from readability import Document
 from bs4 import BeautifulSoup
-from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==== 환경변수 ====
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID   = os.getenv("CHAT_ID")
-SHEET_ID  = os.getenv("SHEET_ID_NEWS")
+BOT_TOKEN = os.getenv("BOT_TOKEN")          # 텔레그램 봇 토큰
+CHAT_ID   = os.getenv("CHAT_ID")            # 텔레그램 채팅 ID
+SHEET_ID  = os.getenv("SHEET_ID_NEWS")      # 구글 시트 ID
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 # ==== 시간/상수 ====
@@ -21,7 +20,7 @@ NOW_KST = datetime.now(KST)
 YESTERDAY_KST = (NOW_KST - timedelta(days=1)).date()
 TODAY_KST = NOW_KST.date()
 
-# '1일' ~ '31일' → OR 검색(한 번에 요청)
+# '1일' ~ '31일' → OR 검색(한 번에 RSS 요청)
 DAY_TERMS = [f"{d}일" for d in range(1, 32)]
 OR_QUERY = " OR ".join(DAY_TERMS)
 
@@ -38,7 +37,7 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 }
 
-# 병렬 파싱 제어
+# 병렬 본문 파싱
 MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
 
 # ==== Google Sheets ====
@@ -61,26 +60,18 @@ def get_or_create_daily_ws(sh, date_str: str):
     try:
         ws = sh.worksheet(date_str)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=date_str, rows=2000, cols=3)
+        ws = sh.add_worksheet(title=date_str, rows=4000, cols=3)
     return ws
 
 def write_sheet_all(sh, items):
-    """
-    전체 기사(제목/URL/게시시각KST)를 날짜별 탭에 기록.
-    - URL 동일 제거
-    - 제목 유사도 ≥0.70 제거
-    """
-    items = dedupe_for_sheet(items, title_similarity_threshold=0.70)
-
+    """전체 기사(제목/URL/게시시각KST)를 날짜별 탭에 기록(중복 제거/선별 없음)."""
     date_tab = TODAY_KST.strftime("%Y-%m-%d")
     ws = get_or_create_daily_ws(sh, date_tab)
     ws.clear()
     ws.append_row(["기사 제목", "URL", "게시시각(KST)"])
-
     if items:
         rows = [[it["title"], it["link"], it["published_kst"].strftime("%Y-%m-%d %H:%M")] for it in items]
         ws.append_rows(rows, value_input_option="RAW")
-
     sheet_url = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit#gid={ws.id}"
     return sheet_url, len(items)
 
@@ -100,42 +91,8 @@ def is_within_yesterday_or_today(pub_dt_utc: datetime) -> bool:
     kst = pub_dt_utc.astimezone(KST)
     return kst.date() in {YESTERDAY_KST, TODAY_KST}
 
-def dedupe(items):
-    """링크 기준 중복 제거(수집 단계)"""
-    seen = set()
-    out = []
-    for it in items:
-        key = it["link"]
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(it)
-    return out
-
-def title_similarity(a: str, b: str) -> float:
-    return SequenceMatcher(None, a.strip(), b.strip()).ratio()
-
-def dedupe_for_sheet(items, title_similarity_threshold=0.70):
-    """시트 적재 전: URL 동일/제목 유사(≥threshold) 제거"""
-    seen_urls = set()
-    kept = []
-    kept_titles = []
-    for it in items:
-        url = it["link"]
-        title = it["title"]
-        if url in seen_urls:
-            continue
-        if kept_titles:
-            sim = max(title_similarity(title, t) for t in kept_titles)
-            if sim >= title_similarity_threshold:
-                continue
-        kept.append(it)
-        kept_titles.append(title)
-        seen_urls.add(url)
-    return kept
-
-# ==== 본문 추출 (병렬) ====
 def extract_article_text(url: str) -> str:
+    """본문 추출(제목에 날짜 패턴 없을 때만 호출)"""
     try:
         resp = requests.get(url, headers=HEADERS, timeout=REQ_TIMEOUT, allow_redirects=True)
         resp.raise_for_status()
@@ -150,8 +107,10 @@ def extract_article_text(url: str) -> str:
         return ""
 
 def extract_bodies_parallel(urls):
-    """URL 리스트를 병렬로 파싱 → {url: body}"""
+    """URL 리스트 병렬 본문 파싱 → {url: body}"""
     out = {}
+    if not urls:
+        return out
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {ex.submit(extract_article_text, u): u for u in urls}
         for fut in as_completed(futures):
@@ -161,80 +120,6 @@ def extract_bodies_parallel(urls):
             except Exception:
                 out[u] = ""
     return out
-
-# ==== “주가 영향” 스코어 ====
-MAJOR_COMPANY_EVENTS = [
-    r"실적|영업이익|순이익|가이던스|목표가|상향|하향|컨센서스",
-    r"인수|합병|M&A|매각|지분 취득|지분 매각|전략적 제휴|JV",
-    r"대규모\s*수주|수주 공시|공급 계약|장기 계약|납품",
-    r"리콜|품질 문제|사고|화재|공장|라인 중단|파업",
-    r"CEO|대표이사|사임|해임|선임|횡령|배임|수사|압수수색",
-    r"증자|유상증자|감자|CB|BW|전환사채|배당|자사주|신규 상장|상장폐지|관리종목",
-    r"FDA|품목허가|허가 취소|임상\s*(성공|실패)|긴급사용승인|식약처|EMA",
-    r"공정위|과징금|제재|담합|조사 착수|검찰",
-]
-INDUSTRY_WIDE = [
-    r"업황|사이클|수요 둔화|수요 회복|가격 인상|가격 인하|감산|증산",
-    r"메모리|DRAM|NAND|반도체 장비|리튬|니켈|코발트|원자재",
-    r"보조금|규제|완화|의무화|친환경|RE100|탄소|수출입 규제",
-]
-GLOBAL_MACRO = [
-    r"연준|Fed|금리\s*(인상|인하|동결)|FOMC|ECB|BOJ|중국\s*부양|환율|달러|엔화|위안",
-    r"유가|WTI|브렌트|OPEC|감산",
-    r"전쟁|무력|분쟁|우크라이나|중동|대만|제재|수출통제|관세",
-]
-# 지도자/정치: 환경변수로 동적으로 확장 가능 (기본에 트럼프/이재명 포함)
-LEADER_NAMES = os.getenv("LEADER_NAMES", "트럼프|Trump|이재명|대통령|백악관|청와대")
-POLITICAL = [
-    rf"{LEADER_NAMES}|정상회담|행정명령|대책|특별법|추경|예산|정책 발표|국무회의|국회",
-]
-
-WEIGHTS = {
-    "MAJOR_COMPANY_EVENTS": 4,
-    "INDUSTRY_WIDE": 2,
-    "GLOBAL_MACRO": 3,
-    "POLITICAL": 3,
-    "DATE_CONTEXT": 1,
-    "TIME_CONTEXT": 1,
-}
-DATE_CONTEXT = r"부터|까지|자|시행|마감|공고|발표|개최|접수|시한|효력|효과"
-TIME_CONTEXT = r"오전|오후|\d{1,2}\s*시|\d{1,2}\s*분"
-
-def _score_with_patterns(text: str, patterns, weight: int):
-    score = 0
-    for pat in patterns:
-        if re.search(pat, text, re.IGNORECASE):
-            score += weight
-    return score
-
-def market_moving_score(title: str, body: str) -> int:
-    full = (title or "") + "\n" + (body or "")
-    score = 0
-    score += _score_with_patterns(full, MAJOR_COMPANY_EVENTS, WEIGHTS["MAJOR_COMPANY_EVENTS"])
-    score += _score_with_patterns(full, INDUSTRY_WIDE, WEIGHTS["INDUSTRY_WIDE"])
-    score += _score_with_patterns(full, GLOBAL_MACRO, WEIGHTS["GLOBAL_MACRO"])
-    score += _score_with_patterns(full, POLITICAL, WEIGHTS["POLITICAL"])
-    if re.search(DATE_CONTEXT, full): score += WEIGHTS["DATE_CONTEXT"]
-    if re.search(TIME_CONTEXT, full): score += WEIGHTS["TIME_CONTEXT"]
-    return score
-
-def filter_market_moving(items, body_cache):
-    """
-    시장영향 기사만 선별: 제목에서 강신호 없으면 본문(캐시 or 병렬 결과)로 보강.
-    임계치 4 이상만 채택.
-    """
-    high_sig_regex = "|".join([*MAJOR_COMPANY_EVENTS, *GLOBAL_MACRO, *POLITICAL])
-    kept = []
-    for it in items:
-        title = it["title"]
-        link  = it["link"]
-        needs_body = not re.search(high_sig_regex, title, re.IGNORECASE)
-        body = body_cache.get(link, "") if needs_body else ""
-        score = market_moving_score(title, body)
-        if score >= 4:
-            it["mm_score"] = score
-            kept.append(it)
-    return kept
 
 # ==== 텔레그램 ====
 def send_tg(text: str):
@@ -249,53 +134,25 @@ def send_tg(text: str):
     }, timeout=30)
     r.raise_for_status()
 
-def build_top5_message(items, sheet_url: str, sheet_count: int):
-    total = len(items)
-    top = items[:5]
-    header = f"📈 시장영향 가능성 높은 기사 (어제/오늘)\n선별 {total}건 중 TOP 5 아래 ⬇️\n"
-
-    if not top:
-        text = f"{header}\n(해당 기사 없음)\n\n📊 전체 목록({sheet_count}건): {html.escape(sheet_url)}"
-        return [text]
-
-    lines = []
-    for it in top:
-        title = it['title'].strip()
-        if len(title) > 150:
-            title = title[:147] + "…"
-        link = it["link"]
-        ts = it["published_kst"].strftime("%Y-%m-%d %H:%M")
-        score = it.get("mm_score", 0)
-        lines.append(f"• {html.escape(title)}\n{html.escape(link)}  <i>({ts} KST · score {score})</i>")
-
-    body = "\n\n".join(lines)
-    footer = f"\n\n📊 전체 목록({sheet_count}건): {html.escape(sheet_url)}"
-    text = header + "\n" + body + footer
-
-    if len(text) <= 4096:
-        return [text]
-
-    chunks, cur, size = [], [header], len(header)
-    for block in lines + [footer]:
-        block = "\n\n" + block
-        if size + len(block) > 4096:
-            chunks.append("".join(cur))
-            cur, size = [block], len(block)
-        else:
-            cur.append(block); size += len(block)
-    if cur: chunks.append("".join(cur))
-    return chunks
+def build_done_message(sheet_url: str, count: int):
+    hdr = "✅ 뉴스 적재가 완료되었습니다."
+    rng = f"(범위: 어제~오늘 KST)"
+    link = f"📊 전체 목록: {html.escape(sheet_url)}"
+    cnt  = f"총 적재 건수: {count}건"
+    text = f"{hdr}\n{rng}\n{cnt}\n\n{link}"
+    # 4096자 한참 아래라 분할 불필요
+    return [text]
 
 # ==== 메인 ====
 def main():
-    # 1) OR 검색으로 한 번만 RSS 호출
+    # 1) OR 검색으로 RSS 1회 호출
     entries = fetch_entries_combined_or()
 
-    # 2) 후보 구성 (어제/오늘만)
+    # 2) 어제/오늘 후보 생성
     candidates = []
     for e in entries:
-        title = e.get("title", "").strip()
-        link  = e.get("link", "").strip()
+        title = (e.get("title") or "").strip()
+        link  = (e.get("link") or "").strip()
         if not title or not link:
             continue
         pub_utc = parse_published(e)
@@ -307,41 +164,28 @@ def main():
             "published_kst": pub_utc.astimezone(KST),
         })
 
-    # 3) 링크 중복 제거
-    candidates = dedupe(candidates)
-
-    # 4) 날짜 패턴 필터: 제목 통과 + (제목 미통과는 본문 병렬 추출로 2차 필터)
+    # 3) 날짜 키워드 필터(제목 우선, 제목 미통과는 본문 병렬 파싱)
     title_pass = [it for it in candidates if DATE_TERM_RE.search(it["title"])]
     need_body  = [it for it in candidates if not DATE_TERM_RE.search(it["title"])]
 
-    bodies_for_date = {}
-    if need_body:
-        bodies_for_date = extract_bodies_parallel([it["link"] for it in need_body])
+    bodies = extract_bodies_parallel([it["link"] for it in need_body]) if need_body else {}
 
-    date_filtered = []
-    date_filtered.extend(title_pass)
+    results = []
+    results.extend(title_pass)
     for it in need_body:
-        body = bodies_for_date.get(it["link"], "")
+        body = bodies.get(it["link"], "")
         if body and DATE_TERM_RE.search(body):
-            date_filtered.append(it)
+            results.append(it)
 
-    # 5) 최신순 정렬
-    date_filtered.sort(key=lambda x: x["published_kst"], reverse=True)
+    # 4) 최신순 정렬(시트 적재용)
+    results.sort(key=lambda x: x["published_kst"], reverse=True)
 
-    # 6) 시장영향 기사 선별: 제목 강신호 없는 것만 추가로 **병렬** 본문 추출
-    high_sig_regex = "|".join([*MAJOR_COMPANY_EVENTS, *GLOBAL_MACRO, *POLITICAL])
-    to_fetch = [it["link"] for it in date_filtered if not re.search(high_sig_regex, it["title"], re.IGNORECASE)]
-    body_cache = extract_bodies_parallel(to_fetch) if to_fetch else {}
-
-    market_items = filter_market_moving(date_filtered, body_cache)
-    market_items.sort(key=lambda x: (x.get("mm_score", 0), x["published_kst"]), reverse=True)
-
-    # 7) 전체(중복 억제 버전) → 시트 기록
+    # 5) 스프레드시트에 전량 적재 (중복제거/우선순위 없음)
     sh = ensure_gspread()
-    sheet_url, sheet_count = write_sheet_all(sh, date_filtered)
+    sheet_url, cnt = write_sheet_all(sh, results)
 
-    # 8) 텔레그램: 시장영향 TOP 5만
-    texts = build_top5_message(market_items, sheet_url, sheet_count)
+    # 6) 텔레그램: 완료 통지만 + 시트 링크
+    texts = build_done_message(sheet_url, cnt)
     for t in texts:
         send_tg(t)
 
