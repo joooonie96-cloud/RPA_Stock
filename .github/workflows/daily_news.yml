@@ -1,0 +1,13 @@
+- name: Prepare Google credentials
+  run: |
+    echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > $HOME/sa.json
+    echo "GOOGLE_APPLICATION_CREDENTIALS=$HOME/sa.json" >> $GITHUB_ENV
+
+- name: Run crawler
+  env:
+    BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+    CHAT_ID:   ${{ secrets.CHAT_ID }}
+    SHEET_ID_NEWS: ${{ secrets.SHEET_ID_NEWS }}
+    GOOGLE_APPLICATION_CREDENTIALS: ${{ env.GOOGLE_APPLICATION_CREDENTIALS }}
+  run: |
+    python news_crawl.py
