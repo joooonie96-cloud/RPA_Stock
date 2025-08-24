@@ -4,7 +4,7 @@ on:
   workflow_dispatch: {}
   schedule:
     # 한국시간(KST) 15:50
-    - cron: "50 6 * * *"
+    - cron: "0 9 * * *"
 
 jobs:
   send-report:
